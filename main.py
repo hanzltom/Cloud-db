@@ -1,7 +1,6 @@
 import boto3
 import sys, os, time
 from botocore.exceptions import ClientError
-import paramiko
 
 def get_key_pair(ec2_client):
     """
@@ -11,7 +10,7 @@ def get_key_pair(ec2_client):
         Returns:
             Key name
         """
-    key_name = "tp2"
+    key_name = "key_final"
     try:
         ec2_client.describe_key_pairs(KeyNames=[key_name])
         print(f"Key Pair {key_name} already exists. Using the existing key.")
@@ -162,6 +161,156 @@ def get_subnet(ec2_client, vpc_id):
         sys.exit(1)
 
 
+def launch_workers(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id, num_instances):
+    """
+    Launches EC2 worker instance.
+    Args:
+        ec2_client: The EC2 client.
+        image_id: The AMI ID for the instance.
+        instance_type: The type of instance (e.g., 't2.micro').
+        key_name: The key pair name to use for SSH access.
+        security_group_id: The security group ID.
+        subnet_id: The subnet ID.
+    Returns:
+        orchestrator instance
+    """
+    user_data_script = '''#!/bin/bash
+                        sudo apt update
+                        sudo apt upgrade -y
+                        
+                        sudo apt install mysql-server -y
+
+                        sudo mysql 
+                        
+                        CREATE DATABASE worker_db;
+                        USE worker_db; -- Switch to the new database
+
+                        CREATE TABLE users (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            name VARCHAR(100),
+                            age INT
+                        );
+                        
+                        INSERT INTO users (name, age)
+                        VALUES ('Alice', 30),
+                               ('Bob', 25),
+                               ('Charlie', 35);
+
+                        '''
+
+    try:
+        response = ec2_client.run_instances(
+            ImageId=image_id,
+            MinCount=num_instances,
+            MaxCount=num_instances,
+            InstanceType=instance_type,
+            KeyName=key_name,
+            SecurityGroupIds=[security_group_id],
+            SubnetId=subnet_id,
+            UserData=user_data_script,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {
+                            'Key': 'Name',
+                            'Value': 'LabInstance'
+                        }
+                    ]
+                }
+            ]
+        )
+
+        ec2_resource = boto3.resource('ec2')
+
+        instance_objects = [ec2_resource.Instance(instance['InstanceId']) for instance in response['Instances']]
+
+        print(f"Launched {num_instances} {instance_type} instances.")
+        # Wait for all instances to be in "running" state and collect instance details
+        for instance in instance_objects:
+            instance.wait_until_running()
+            instance.reload()  # Reload instance attributes to get updated info
+            print(f"Worker instance IP: {instance.public_ip_address}   ID: {instance.id}")
+
+        return instance_objects
+
+    except ClientError as e:
+        print(f"Error launching instances: {e}")
+        sys.exit(1)
+
+
+def launch_manager(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
+    """
+    Launches EC2 orchestrator instance.
+    Args:
+        ec2_client: The EC2 client.
+        image_id: The AMI ID for the instance.
+        instance_type: The type of instance (e.g., 't2.micro').
+        key_name: The key pair name to use for SSH access.
+        security_group_id: The security group ID.
+        subnet_id: The subnet ID.
+    Returns:
+        orchestrator instance
+    """
+    user_data_script = '''#!/bin/bash
+                        sudo apt update
+                        sudo apt upgrade -y
+                        
+                        sudo apt install mysql-server -y
+
+                        mysql -u root -p
+                        
+                        CREATE DATABASE manager_db;
+                        USE manager_db; -- Switch to the new database
+
+                        CREATE TABLE users (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            name VARCHAR(100),
+                            age INT
+                        );
+                        
+                        '''
+
+    try:
+        response = ec2_client.run_instances(
+            ImageId=image_id,
+            MinCount=1,
+            MaxCount=1,
+            InstanceType=instance_type,
+            KeyName=key_name,
+            SecurityGroupIds=[security_group_id],
+            SubnetId=subnet_id,
+            UserData=user_data_script,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {
+                            'Key': 'Name',
+                            'Value': 'LabInstance'
+                        }
+                    ]
+                }
+            ]
+        )
+
+        ec2_resource = boto3.resource('ec2')
+
+        # Retrieve instance objects using the InstanceId
+        manager_list = [ec2_resource.Instance(instance['InstanceId']) for instance in response['Instances']]
+        manager = manager_list[0]
+
+        manager.wait_until_running()
+        manager.reload()
+
+        print(f"Manager launched IP: {manager.public_ip_address}   ID: {manager.id}")
+
+        return manager
+
+    except ClientError as e:
+        print(f"Error launching instances: {e}")
+        sys.exit(1)
+
 def main():
     try:
         # Initialize EC2 and ELB clients
@@ -176,6 +325,9 @@ def main():
         key_name = get_key_pair(ec2_client)
         security_group_id = create_security_group(ec2_client, vpc_id)
         subnet_id = get_subnet(ec2_client, vpc_id)
+
+        launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_id, subnet_id, 2)
+        launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_id, subnet_id)
 
 
     except Exception as e:
