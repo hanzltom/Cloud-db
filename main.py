@@ -1,6 +1,7 @@
 import boto3
 import sys, os, time
 from botocore.exceptions import ClientError
+import paramiko
 
 def get_key_pair(ec2_client):
     """
@@ -75,12 +76,11 @@ def create_security_group(ec2_client, vpc_id, description="My Security Group"):
     """
     group_name = "my-security-group"
     inbound_rules = [
-        #{'protocol': 'tcp', 'port_range': 8000, 'source': '0.0.0.0/0'},
-        #{'protocol': 'tcp', 'port_range': 8001, 'source': '0.0.0.0/0'},
         {'protocol': 'tcp', 'port_range': 5000, 'source': '0.0.0.0/0'},
         {'protocol': 'tcp', 'port_range': 5001, 'source': '0.0.0.0/0'},
         {'protocol': 'tcp', 'port_range': 22, 'source': '0.0.0.0/0'},
-        {'protocol': 'tcp', 'port_range': 8000, 'source': '96.127.217.181/32'}
+        {'protocol': 'tcp', 'port_range': 8000, 'source': '96.127.217.181/32'},
+        {'protocol': 'tcp', 'port_range': 3306, 'source': '0.0.0.0/0'}
     ]
 
     try:
@@ -161,7 +161,8 @@ def get_subnet(ec2_client, vpc_id):
         sys.exit(1)
 
 
-def launch_workers(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id, num_instances):
+def launch_workers(ec2_client, image_id, instance_type, key_name, security_group_id,
+                   subnet_id, num_of_instance, manager_ip, log_file, log_pos):
     """
     Launches EC2 worker instance.
     Args:
@@ -174,35 +175,28 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
     Returns:
         orchestrator instance
     """
-    user_data_script = '''#!/bin/bash
-                        sudo apt update
-                        sudo apt upgrade -y
-                        
-                        sudo apt install mysql-server -y
-
-                        sudo mysql 
-                        
-                        CREATE DATABASE worker_db;
-                        USE worker_db; -- Switch to the new database
-
-                        CREATE TABLE users (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            name VARCHAR(100),
-                            age INT
-                        );
-                        
-                        INSERT INTO users (name, age)
-                        VALUES ('Alice', 30),
-                               ('Bob', 25),
-                               ('Charlie', 35);
-
-                        '''
+    user_data_script = f'''#!/bin/bash
+                            sudo apt update
+                            sudo apt install mysql-server -y
+                            sudo sed -i '/server-id/d' /etc/mysql/mysql.conf.d/mysqld.cnf
+                            echo "server-id={num_of_instance + 2}" | sudo tee -a /etc/mysql/mysql.conf.d/mysqld.cnf
+                            sudo systemctl restart mysql
+                            sudo mysql -e "
+                            CHANGE MASTER TO
+                                MASTER_HOST = '{manager_ip}', 
+                                MASTER_USER = 'replica', 
+                                MASTER_PASSWORD = 'replica_password', 
+                                MASTER_LOG_FILE = '{log_file}', 
+                                MASTER_LOG_POS = {log_pos};
+                            START SLAVE;
+                            "
+                            '''
 
     try:
         response = ec2_client.run_instances(
             ImageId=image_id,
-            MinCount=num_instances,
-            MaxCount=num_instances,
+            MinCount=1,
+            MaxCount=1,
             InstanceType=instance_type,
             KeyName=key_name,
             SecurityGroupIds=[security_group_id],
@@ -224,15 +218,15 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
         ec2_resource = boto3.resource('ec2')
 
         instance_objects = [ec2_resource.Instance(instance['InstanceId']) for instance in response['Instances']]
+        worker = instance_objects[0]
 
-        print(f"Launched {num_instances} {instance_type} instances.")
         # Wait for all instances to be in "running" state and collect instance details
         for instance in instance_objects:
             instance.wait_until_running()
             instance.reload()  # Reload instance attributes to get updated info
             print(f"Worker instance IP: {instance.public_ip_address}   ID: {instance.id}")
 
-        return instance_objects
+        return worker
 
     except ClientError as e:
         print(f"Error launching instances: {e}")
@@ -252,24 +246,42 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
     Returns:
         orchestrator instance
     """
-    user_data_script = '''#!/bin/bash
-                        sudo apt update
-                        sudo apt upgrade -y
-                        
-                        sudo apt install mysql-server -y
+    user_data_script = '''#!/bin/bash 
+                                # Update and install MySQL
+                                sudo apt update
+                                sudo apt install mysql-server -y
 
-                        mysql -u root -p
-                        
-                        CREATE DATABASE manager_db;
-                        USE manager_db; -- Switch to the new database
+                                # Configure MySQL as a replication source
+                                sudo sed -i '/\[mysqld\]/a server-id=1\nlog_bin=/var/log/mysql/mysql-bin.log' /etc/mysql/mysql.conf.d/mysqld.cnf
+                            sudo sed -i "s/bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mysql.conf.d/mysqld.cnf
 
-                        CREATE TABLE users (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            name VARCHAR(100),
-                            age INT
-                        );
-                        
-                        '''
+                                # Restart MySQL to apply changes
+                                sudo systemctl restart mysql
+
+                                # Set up MySQL replication user
+                                sudo mysql -e "
+                                CREATE USER 'replica'@'%' IDENTIFIED WITH mysql_native_password BY 'replica_password';
+                                GRANT REPLICATION SLAVE ON *.* TO 'replica'@'%';
+                                FLUSH PRIVILEGES;
+                                "
+                                
+                                # Save the replication status log file and position for workers
+                                sudo mysql -e "SHOW MASTER STATUS\G" | tee /home/ubuntu/master_status.txt
+                                
+                                sleep 180
+
+                                # Create the 'worker_db' database and an initial table
+                                sudo mysql -e "
+                                CREATE DATABASE IF NOT EXISTS worker_db;
+                                USE worker_db;
+                                CREATE TABLE IF NOT EXISTS users (
+                                    id INT AUTO_INCREMENT PRIMARY KEY,
+                                    name VARCHAR(100),
+                                    age INT
+                                );
+                                INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35);
+                                "
+                                '''
 
     try:
         response = ec2_client.run_instances(
@@ -311,11 +323,31 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
         print(f"Error launching instances: {e}")
         sys.exit(1)
 
+def transfer_master_status(manager, key_file):
+    time.sleep(120)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(manager.public_ip_address, username='ubuntu', key_filename=key_file)
+
+    scp = paramiko.SFTPClient.from_transport(ssh.get_transport())
+    scp.get('/home/ubuntu/master_status.txt', 'master_status.txt')
+    scp.close()
+    ssh.close()
+
+    with open('master_status.txt', 'r') as f:
+        content = f.read()
+    log_file = content.split("File: ")[1].split("\n")[0]
+    log_pos = content.split("Position: ")[1].split("\n")[0]
+
+    print(f"Retreived log_file: {log_file}, log_pos: {log_pos}")
+    return log_file, log_pos
+
 def main():
     try:
         # Initialize EC2 and ELB clients
         ec2_client = boto3.client('ec2')
         elbv2_client = boto3.client('elbv2')
+        num_of_workers = 2
 
         # Define essential AWS configuration
         vpc_id = get_vpc_id(ec2_client)
@@ -326,8 +358,15 @@ def main():
         security_group_id = create_security_group(ec2_client, vpc_id)
         subnet_id = get_subnet(ec2_client, vpc_id)
 
-        launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_id, subnet_id, 2)
-        launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_id, subnet_id)
+        key_file_path = os.path.join(os.path.expanduser('~/.aws'), f"{key_name}.pem")
+        manager = launch_manager(ec2_client, image_id, "t2.micro", key_name,
+                                 security_group_id, subnet_id)
+        log_file, log_pos = transfer_master_status(manager, key_file_path)
+        worker_instances = []
+        for i in range(num_of_workers):
+            worker = launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_id,
+                           subnet_id, num_of_workers, manager.public_ip_address, log_file, log_pos)
+            worker_instances.append(worker)
 
 
     except Exception as e:
