@@ -194,6 +194,10 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
                             sudo sed -i "s/bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mysql.conf.d/mysqld.cnf
                             sudo systemctl restart mysql
                             sudo mysql -e "
+                            CREATE USER 'replica'@'%' IDENTIFIED WITH mysql_native_password BY 'replica_password';
+                            GRANT SELECT ON sakila.* TO 'replica'@'%';
+                            FLUSH PRIVILEGES;
+
                             CHANGE MASTER TO
                                 MASTER_HOST = '{manager_ip}', 
                                 MASTER_USER = 'replica', 
@@ -523,8 +527,8 @@ def main():
         for instance in [manager, worker_instances[0], worker_instances[1]]:
             tranfer_worker_manager(instance, key_file_path)
 
-        #proxy = launch_proxy(ec2_client, image_id, "t2.large", key_name, security_group_id, subnet_id)
-        #transfer_proxy(proxy, key_file_path)
+        proxy = launch_proxy(ec2_client, image_id, "t2.large", key_name, security_group_id, subnet_id)
+        transfer_proxy(proxy, key_file_path)
 
 
     except Exception as e:

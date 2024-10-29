@@ -13,9 +13,8 @@ except FileNotFoundError:
     print("No files found.")
 
 # Define the IP addresses of the manager and workers
-manager_url = f"http://{worker_ip1}:3306"
-worker_urls = [f"http://{worker_ip1}:3306", f"http://{worker_ip2}:3306"]
-
+manager_url = f"http://{manager_ip}:5000"  # Port 5000 for your Flask app
+worker_urls = [f"http://{worker_ip1}:5000", f"http://{worker_ip2}:5000"]
 
 # Round-robin counter to distribute requests to workers
 worker_index = 0
@@ -24,11 +23,19 @@ worker_index = 0
 def proxy_query():
     global worker_index
     data = request.get_json()
-    query_type = data.get("type")
     query = data.get("query")
 
-    if not query_type or not query:
-        return jsonify({"error": "Missing 'type' or 'query' in request"}), 400
+    if not query:
+        return jsonify({"error": "Missing 'query' in request"}), 400
+
+    # Determine query type based on the query content
+    query_type = "select" if query.strip().lower().startswith("select") else "insert"
+    if query.strip().lower().startswith("select"):
+        query_type = "select"
+    elif query.strip().lower().startswith("insert"):
+        query_type = "insert"
+    else:
+        return jsonify({"Incorrect action in query"}), 500
 
     # Choose target based on query type
     if query_type == "select":
@@ -39,9 +46,12 @@ def proxy_query():
         # Non-select queries go to the manager
         target_url = manager_url
 
+    # Forward the modified JSON payload with the type added
+    modified_data = {"type": query_type, "query": query}
+
     try:
         # Forward the query to the selected target database
-        response = requests.post(f"{target_url}/execute", json={"query": query})
+        response = requests.post(f"{target_url}/execute", json=modified_data)
         return jsonify(response.json()), response.status_code
     except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 500
