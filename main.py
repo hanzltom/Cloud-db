@@ -1,4 +1,4 @@
-import boto3
+import boto3, json
 import sys, os, time
 from botocore.exceptions import ClientError
 import paramiko
@@ -176,10 +176,22 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
         orchestrator instance
     """
     user_data_script = f'''#!/bin/bash
-                            sudo apt update
+                            sudo apt update -y
                             sudo apt install mysql-server -y
+                            
+                            sudo apt install -y python3-pip python3-venv
+                            cd /home/ubuntu
+                            python3 -m venv venv
+                            echo "source venv/bin/activate" >> /home/ubuntu/.bashrc
+                            source venv/bin/activate
+                            
+                            pip3 install flask requests redis
+                            sudo chown -R ubuntu:ubuntu /home/ubuntu/venv
+                            pip install mysql-connector-python
+                            
                             sudo sed -i '/server-id/d' /etc/mysql/mysql.conf.d/mysqld.cnf
                             echo "server-id={num_of_instance + 2}" | sudo tee -a /etc/mysql/mysql.conf.d/mysqld.cnf
+                            sudo sed -i "s/bind-address\s*=.*/bind-address = 0.0.0.0/" /etc/mysql/mysql.conf.d/mysqld.cnf
                             sudo systemctl restart mysql
                             sudo mysql -e "
                             CHANGE MASTER TO
@@ -190,6 +202,13 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
                                 MASTER_LOG_POS = {log_pos};
                             START SLAVE;
                             "
+                            
+                            # Wait for the worker_manager_app.py file to be transferred
+                            while [ ! -f /home/ubuntu/worker_manager_app.py ]; do
+                                sleep 5
+                            done
+
+                            python3 worker_manager_app.py
                             '''
 
     try:
@@ -248,7 +267,7 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
     """
     user_data_script = '''#!/bin/bash 
                                 # Update and install MySQL
-                                sudo apt update
+                                sudo apt update -y
                                 sudo apt install mysql-server -y
 
                                 # Configure MySQL as a replication source
@@ -261,7 +280,10 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
                                 # Set up MySQL replication user
                                 sudo mysql -e "
                                 CREATE USER 'replica'@'%' IDENTIFIED WITH mysql_native_password BY 'replica_password';
+                                CREATE USER 'replica'@'localhost' IDENTIFIED WITH mysql_native_password BY 'replica_password';
                                 GRANT REPLICATION SLAVE ON *.* TO 'replica'@'%';
+                                GRANT ALL PRIVILEGES ON sakila.* TO 'replica'@'%';
+                                GRANT ALL PRIVILEGES ON sakila.* TO 'replica'@'localhost';
                                 FLUSH PRIVILEGES;
                                 "
                                 
@@ -270,17 +292,30 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
                                 
                                 sleep 180
 
-                                # Create the 'worker_db' database and an initial table
-                                sudo mysql -e "
-                                CREATE DATABASE IF NOT EXISTS worker_db;
-                                USE worker_db;
-                                CREATE TABLE IF NOT EXISTS users (
-                                    id INT AUTO_INCREMENT PRIMARY KEY,
-                                    name VARCHAR(100),
-                                    age INT
-                                );
-                                INSERT INTO users (name, age) VALUES ('Alice', 30), ('Bob', 25), ('Charlie', 35);
-                                "
+                                # Download and install the Sakila database
+                                wget https://downloads.mysql.com/docs/sakila-db.tar.gz
+                                tar -xzf sakila-db.tar.gz
+                                sudo mysql < sakila-db/sakila-schema.sql
+                                sudo mysql < sakila-db/sakila-data.sql
+                                
+                                sudo apt install -y python3-pip python3-venv
+                                cd /home/ubuntu
+                                python3 -m venv venv
+                                echo "source venv/bin/activate" >> /home/ubuntu/.bashrc
+                                source venv/bin/activate
+                                
+                                pip3 install flask requests redis
+                                sudo chown -R ubuntu:ubuntu /home/ubuntu/venv
+                                pip install mysql-connector-python
+                                
+                                # Wait for the worker_manager_app.py file to be transferred
+                            while [ ! -f /home/ubuntu/worker_manager_app.py ]; do
+                                sleep 5
+                            done
+                            python3 -m venv venv
+                            echo "source venv/bin/activate" >> /home/ubuntu/.bashrc
+                            source venv/bin/activate
+                            python3 worker_manager_app.py
                                 '''
 
     try:
@@ -316,6 +351,8 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
         manager.reload()
 
         print(f"Manager launched IP: {manager.public_ip_address}   ID: {manager.id}")
+        with open('manager_ip.txt', 'w') as file:
+            file.write(manager.public_ip_address)
 
         return manager
 
@@ -324,23 +361,135 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
         sys.exit(1)
 
 def transfer_master_status(manager, key_file):
-    time.sleep(120)
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(manager.public_ip_address, username='ubuntu', key_filename=key_file)
+    try:
+        time.sleep(120)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(manager.public_ip_address, username='ubuntu', key_filename=key_file)
 
-    scp = paramiko.SFTPClient.from_transport(ssh.get_transport())
-    scp.get('/home/ubuntu/master_status.txt', 'master_status.txt')
-    scp.close()
-    ssh.close()
+        scp = paramiko.SFTPClient.from_transport(ssh.get_transport())
+        scp.get('/home/ubuntu/master_status.txt', 'master_status.txt')
+        scp.close()
+        ssh.close()
 
-    with open('master_status.txt', 'r') as f:
-        content = f.read()
-    log_file = content.split("File: ")[1].split("\n")[0]
-    log_pos = content.split("Position: ")[1].split("\n")[0]
+        with open('master_status.txt', 'r') as f:
+            content = f.read()
+        log_file = content.split("File: ")[1].split("\n")[0]
+        log_pos = content.split("Position: ")[1].split("\n")[0]
 
-    print(f"Retreived log_file: {log_file}, log_pos: {log_pos}")
-    return log_file, log_pos
+        print(f"Retreived log_file: {log_file}, log_pos: {log_pos}")
+        return log_file, log_pos
+
+    except ClientError as e:
+        print(f"Error transfering file: {e}")
+        sys.exit(1)
+
+def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
+    user_data_script = '''#!/bin/bash
+                            sudo apt update -y
+                            sudo apt install -y python3-pip python3-venv
+                            cd /home/ubuntu
+                            python3 -m venv venv
+                            echo "source venv/bin/activate" >> /home/ubuntu/.bashrc
+                            source venv/bin/activate
+
+                            pip3 install flask requests redis
+                            
+                            # Wait for the manager_ip.txt file to be transferred
+                            while [ ! -f /home/ubuntu/manager_ip.txt ]; do
+                                sleep 1
+                            done
+                            
+                            # Wait for the workers_ip.txt file to be transferred
+                            while [ ! -f /home/ubuntu/workers_ip.txt ]; do
+                                sleep 1
+                            done
+                            
+                            # Wait for the proxy.py file to be transferred
+                            while [ ! -f /home/ubuntu/proxy.py ]; do
+                                sleep 5
+                            done
+
+                            python3 proxy.py
+                            '''
+    try:
+        response = ec2_client.run_instances(
+            ImageId=image_id,
+            MinCount=1,
+            MaxCount=1,
+            InstanceType=instance_type,
+            KeyName=key_name,
+            SecurityGroupIds=[security_group_id],
+            SubnetId=subnet_id,
+            UserData=user_data_script,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': [
+                        {
+                            'Key': 'Name',
+                            'Value': 'LabInstance'
+                        }
+                    ]
+                }
+            ]
+        )
+
+        ec2_resource = boto3.resource('ec2')
+
+        # Retrieve instance objects using the InstanceId
+        proxy_list = [ec2_resource.Instance(instance['InstanceId']) for instance in response['Instances']]
+        proxy = proxy_list[0]
+
+        proxy.wait_until_running()
+        proxy.reload()
+
+        print(f"Proxy launched IP: {proxy.public_ip_address}   ID: {proxy.id}")
+
+        return proxy
+
+    except Exception as e:
+        print(f"Error launching instances: {e}")
+        sys.exit(1)
+
+def transfer_proxy(proxy, key_file):
+    try:
+        time.sleep(60)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(proxy.public_ip_address, username='ubuntu', key_filename=key_file)
+
+        scp = paramiko.SFTPClient.from_transport(ssh.get_transport())
+        scp.put('manager_ip.txt', '/home/ubuntu/manager_ip.txt')
+        scp.put('workers_ip.txt', '/home/ubuntu/workers_ip.txt')
+        scp.put('proxy.py', '/home/ubuntu/proxy.py')
+        scp.close()
+        ssh.close()
+
+        print("Proxy files transferred")
+
+    except Exception as e:
+        print(f"Error transfering proxy file: {e}")
+        sys.exit(1)
+
+
+def tranfer_worker_manager(instance, key_file):
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(instance.public_ip_address, username='ubuntu', key_filename=key_file)
+
+        scp = paramiko.SFTPClient.from_transport(ssh.get_transport())
+        scp.put('worker_manager_app.py', '/home/ubuntu/worker_manager_app.py')
+        scp.close()
+        ssh.close()
+
+        print("worker_manager_app transferred")
+
+    except Exception as e:
+        print(f"Error transfering main flask file: {e}")
+        sys.exit(1)
+
 
 def main():
     try:
@@ -359,14 +508,23 @@ def main():
         subnet_id = get_subnet(ec2_client, vpc_id)
 
         key_file_path = os.path.join(os.path.expanduser('~/.aws'), f"{key_name}.pem")
-        manager = launch_manager(ec2_client, image_id, "t2.micro", key_name,
-                                 security_group_id, subnet_id)
+        manager = launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_id, subnet_id)
         log_file, log_pos = transfer_master_status(manager, key_file_path)
+
         worker_instances = []
         for i in range(num_of_workers):
             worker = launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_id,
                            subnet_id, num_of_workers, manager.public_ip_address, log_file, log_pos)
             worker_instances.append(worker)
+        with open('workers_ip.txt', 'w') as file:
+            file.write(f"{worker_instances[0].public_ip_address} {worker_instances[1].public_ip_address}\n")
+
+        time.sleep(60)
+        for instance in [manager, worker_instances[0], worker_instances[1]]:
+            tranfer_worker_manager(instance, key_file_path)
+
+        #proxy = launch_proxy(ec2_client, image_id, "t2.large", key_name, security_group_id, subnet_id)
+        #transfer_proxy(proxy, key_file_path)
 
 
     except Exception as e:
