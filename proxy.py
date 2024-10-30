@@ -52,7 +52,10 @@ def proxy_query():
     try:
         # Forward the query to the selected target database
         response = requests.post(f"{target_url}/execute", json=modified_data)
-        return jsonify(response.json()), response.status_code
+        response_data = response.json()
+        worker_type = f"workers[{worker_index - 1}]" if query_type == "select" else "manager"
+        response_data["source"] = worker_type  # Add source information to the response
+        return jsonify(response_data), response.status_code
     except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 500
 

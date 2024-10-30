@@ -36,7 +36,7 @@ def execute_query():
         if query.strip().lower().startswith("select"):
             result = cursor.fetchall()
             columns = cursor.column_names
-            response = [dict(zip(columns, row)) for row in result]
+            response = {"result": [dict(zip(columns, row)) for row in result]}
         else:
             conn.commit()
             response = {"message": "Query executed successfully"}
