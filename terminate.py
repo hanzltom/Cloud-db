@@ -42,10 +42,25 @@ def delete_security_group(ec2_client, group_name):
     Function to delete security group
     """
     try:
-        ec2_client.delete_security_group(
-            GroupName=group_name
+        response = ec2_client.describe_security_groups(
+            Filters=[
+                {'Name': 'group-name', 'Values': [group_name]},
+                {'Name': 'vpc-id', 'Values': ['vpc-032cfb7211a85408c']}
+            ]
         )
-        print(f"Successfully deleted security group: {group_name}")
+        security_groups = response.get("SecurityGroups", [])
+
+        # Check if the security group exists in the specified VPC
+        if not security_groups:
+            print(f"Security group '{group_name}' not found in VPC vpc-049dacff0f3404970")
+            return
+
+        # Extract the security group ID
+        group_id = security_groups[0]['GroupId']
+
+        # Delete the security group
+        ec2_client.delete_security_group(GroupId=group_id)
+        print(f"Successfully deleted security group: {group_name} in VPC: vpc-049dacff0f3404970")
     except ClientError as e:
         print(f"Error deleting security group: {e}")
 
@@ -64,11 +79,13 @@ def delete_key_pair(ec2_client, key_name):
     except IndexError:
         print(f"Key pair '{key_name}' not found.")
 
+
 if __name__ == "__main__":
     ec2_client = boto3.client('ec2')
     elbv2_client = boto3.client('elbv2')
     terminate_running_instances()
     remove_key_file()
-    delete_security_group(ec2_client, "my-security-group")
+    delete_security_group(ec2_client, "public")
+    delete_security_group(ec2_client, "private")
     delete_key_pair(ec2_client, 'key_final')
 
