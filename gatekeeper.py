@@ -14,13 +14,14 @@ except FileNotFoundError:
 def execute_query():
     data = request.get_json()
     query = data.get("query")
-    modified_data = {"Authorization": 'approved', "query": query}
+    routing_strategy = data.get("strategy", "round-robin")
+    modified_data = {"Authorization": True, "query": query, "strategy": routing_strategy}
 
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
     try:
-        response = requests.post(f"{trusted_host_ip}:5000/validate", json=modified_data)
+        response = requests.post(f"http://{trusted_host_ip}:5000/validate", json=modified_data)
         return jsonify(response.json()), response.status_code
 
     except requests.exceptions.RequestException as e:

@@ -74,6 +74,7 @@ def proxy_query():
             target_url = min(ping_times, key=lambda x: x[1])[0]  # Select worker with lowest ping
         else:
             # Default to round-robin
+            routing_strategy = "round-robin"
             target_url = worker_urls[worker_index]
             worker_index = (worker_index + 1) % len(worker_urls)
     else:
