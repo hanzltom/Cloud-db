@@ -1,6 +1,7 @@
 import boto3, json
 import sys, os, time
 from botocore.exceptions import ClientError
+from scp import SCPClient
 import paramiko
 
 def get_key_pair(ec2_client):
@@ -77,11 +78,12 @@ def create_security_group(ec2_client, vpc_id, group_name):
         {'protocol': 'tcp', 'port_range': 5000, 'source': '0.0.0.0/0'},
         {'protocol': 'tcp', 'port_range': 5001, 'source': '0.0.0.0/0'},
         {'protocol': 'tcp', 'port_range': 22, 'source': '0.0.0.0/0'},
+        {'protocol': 'tcp', 'port_range': 3306, 'source': '0.0.0.0/0'}
     ]
     inbound_rules_private = [
-        {'protocol': 'tcp', 'port_range': 3306, 'source': '0.0.0.0/0'},  # Allow MySQL traffic only within the VPC
-        {'protocol': 'tcp', 'port_range': 5000, 'source': '0.0.0.0/0'},  # Allow proxy-to-manager or worker traffic only within the VPC
-        {'protocol': 'tcp', 'port_range': 22, 'source': '0.0.0.0/0'}
+        {'protocol': 'tcp', 'port_range': 3306, 'source': '172.31.0.0/16'},  # Allow MySQL traffic only within the VPC
+        {'protocol': 'tcp', 'port_range': 5000, 'source': '172.31.0.0/16'},  # Allow proxy-to-manager or worker traffic only within the VPC
+        {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'}
     ]
 
     try:
@@ -189,47 +191,6 @@ def create_route(ec2_client, vpc_id, subnet_id, igw_id):
 
     print(f"Created route for subnet: {subnet_id} via IGW: {igw_id}")
 
-def launch_bastion(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
-    try:
-        response = ec2_client.run_instances(
-            ImageId=image_id,
-            MinCount=1,
-            MaxCount=1,
-            InstanceType=instance_type,
-            KeyName=key_name,
-            SecurityGroupIds=[security_group_id],
-            SubnetId=subnet_id,
-            #UserData=user_data_script,
-            TagSpecifications=[
-                {
-                    'ResourceType': 'instance',
-                    'Tags': [
-                        {
-                            'Key': 'Name',
-                            'Value': 'LabInstance'
-                        }
-                    ]
-                }
-            ]
-        )
-
-        ec2_resource = boto3.resource('ec2')
-
-        # Retrieve instance objects using the InstanceId
-        bastion_list = [ec2_resource.Instance(instance['InstanceId']) for instance in response['Instances']]
-        bastion = bastion_list[0]
-
-        bastion.wait_until_running()
-        bastion.reload()
-
-        print(f"Bastion launched IP: {bastion.public_ip_address}   ID: {bastion.id}")
-
-        return bastion
-
-    except ClientError as e:
-        print(f"Error launching instances: {e}")
-        sys.exit(1)
-
 def launch_workers(ec2_client, image_id, instance_type, key_name, security_group_id,
                    subnet_id, num_of_instance, manager_ip, log_file, log_pos):
     """
@@ -323,7 +284,6 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
     except ClientError as e:
         print(f"Error launching instances: {e}")
         sys.exit(1)
-
 
 def launch_manager(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
     """
@@ -425,63 +385,12 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
 
         print(f"Manager launched IP: {manager.public_ip_address }   ID: {manager.id}")
         with open('manager_ip.txt', 'w') as file:
-            file.write(manager.public_ip_address )
+            file.write(manager.private_ip_address )
 
         return manager
 
     except ClientError as e:
         print(f"Error launching instances: {e}")
-        sys.exit(1)
-
-def transfer_master_status_new(manager, bastion, key_file):
-    try:
-        # Wait to ensure that instances are fully up and running (optional)
-        #time.sleep(120)
-
-        # Initialize SSH client for bastion host
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        # Connect to the bastion host
-        ssh.connect(bastion.public_ip_address, username='ubuntu', key_filename=key_file)
-
-        # Get the transport object from the SSH connection
-        transport = ssh.get_transport()
-
-        # Define destination (manager's private IP) and local address (bastion's private IP)
-        dest_addr = (manager.private_ip_address, 22)
-        print(f"Manager public: {manager.public_ip_address}, private: {manager.private_ip_address}")
-        local_addr = (bastion.private_ip_address, 22)
-        print(f"Bastion public: {bastion.public_ip_address}, private: {bastion.private_ip_address}")
-
-        # Create a channel to the manager instance
-        channel = transport.open_channel("direct-tcpip", dest_addr, local_addr)
-
-        # Now create an SFTP session over the channel
-        sftp = paramiko.SFTPClient.from_transport(channel)
-
-        # Retrieve the file from the manager instance
-        sftp.get('/home/ubuntu/master_status.txt', 'master_status.txt')
-
-        # Clean up
-        sftp.close()
-        ssh.close()
-
-        # Read and process the retrieved file
-        with open('master_status.txt', 'r') as f:
-            content = f.read()
-
-        log_file = content.split("File: ")[1].split("\n")[0]
-        log_pos = content.split("Position: ")[1].split("\n")[0]
-
-        print(f"Retrieved log_file: {log_file}, log_pos: {log_pos}")
-        return log_file, log_pos
-
-    except paramiko.SSHException as e:
-        print(f"SSH connection error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error transferring file: {e}")
         sys.exit(1)
 
 def transfer_master_status(manager, key_file):
@@ -507,7 +416,7 @@ def transfer_master_status(manager, key_file):
         print(f"Error transfering file: {e}")
         sys.exit(1)
 
-def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id, manager_ip, workers_ip):
+def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
     user_data_script = '''#!/bin/bash
                             sudo apt update -y
                             sudo apt install -y python3-pip python3-venv
@@ -570,7 +479,7 @@ def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_i
 
         print(f"Proxy launched IP: {proxy.public_ip_address}   ID: {proxy.id}")
         with open('proxy_ip.txt', 'w') as file:
-            file.write(proxy.public_ip_address )
+            file.write(proxy.private_ip_address )
         return proxy
 
     except Exception as e:
@@ -728,13 +637,16 @@ def launch_trusted_host(ec2_client, image_id, instance_type, key_name, security_
 
         print(f"Trusted Host launched IP: {trusted_host.public_ip_address}   ID: {trusted_host.id}")
         with open('trusted_host_ip.txt', 'w') as file:
-            file.write(trusted_host.public_ip_address )
+            file.write(trusted_host.private_ip_address )
         return trusted_host
 
     except ClientError as e:
         print(f"Error launching instances: {e}")
         sys.exit(1)
 
+def change_security_group(ec2, instance, security_group_id):
+    ec2.modify_instance_attribute(InstanceId=instance.id, Groups=[security_group_id])
+    print("Security group changed")
 
 def main():
     try:
@@ -749,26 +661,23 @@ def main():
 
         # Get key pair, security group, and subnet
         key_name = get_key_pair(ec2_client)
+
         key_file_path = os.path.join(os.path.expanduser('~/.aws'), f"{key_name}.pem")
         security_group_public = create_security_group(ec2_client, vpc_id, "public")
         security_group_private = create_security_group(ec2_client, vpc_id, "private")
         subnet_public, subnet_private = get_subnet(ec2_client, vpc_id)
 
-        #igw_id = create_internet_gateway(ec2_client, vpc_id)
-        #create_route(ec2_client, vpc_id, subnet_public, igw_id)
 
-        #bastion = launch_bastion(ec2_client, image_id, "t2.micro", key_name, security_group_public, subnet_public)
-
-        manager = launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_private, subnet_private)
+        manager = launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_public, subnet_private)
         log_file, log_pos = transfer_master_status(manager, key_file_path)
 
         worker_instances = []
         for i in range(num_of_workers):
-            worker = launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_private,
-                           subnet_private, num_of_workers, manager.public_ip_address, log_file, log_pos)
+            worker = launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_public,
+                           subnet_private, num_of_workers, manager.private_ip_address, log_file, log_pos)
             worker_instances.append(worker)
         with open('workers_ip.txt', 'w') as file:
-            file.write(f"{worker_instances[0].public_ip_address} {worker_instances[1].public_ip_address}\n")
+            file.write(f"{worker_instances[0].private_ip_address} {worker_instances[1].private_ip_address}\n")
 
         time.sleep(60)
         for instance in [manager, worker_instances[0], worker_instances[1]]:
@@ -777,15 +686,19 @@ def main():
         gatekeeper = launch_gatekeeper(ec2_client, image_id, "t2.large", key_name,
                                        security_group_public, subnet_public)
         trusted_host = launch_trusted_host(ec2_client, image_id, "t2.large", key_name,
-                                           security_group_private, subnet_private)
+                                           security_group_public, subnet_private)
         proxy = launch_proxy(ec2_client, image_id, "t2.large", key_name,
-                             security_group_public, subnet_public, manager.public_ip_address,
-                             [worker_instances[0].public_ip_address, worker_instances[1].public_ip_address])
+                             security_group_public, subnet_private)
         time.sleep(60)
         transfer_files(gatekeeper, key_file_path, ['gatekeeper.py', 'trusted_host_ip.txt'])
         transfer_files(trusted_host, key_file_path, ['trusted_host.py', 'proxy_ip.txt'])
         transfer_files(proxy, key_file_path, ['manager_ip.txt', 'workers_ip.txt', 'proxy.py'])
 
+        time.sleep(30)
+        print("Changing security groups:")
+        for instance in [manager, worker_instances[0], worker_instances[1], proxy, trusted_host]:
+            change_security_group(ec2_client, instance, security_group_private)
+        time.sleep(30)
 
     except Exception as e:
         print(f"Error during execution: {e}")
