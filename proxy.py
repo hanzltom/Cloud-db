@@ -3,6 +3,7 @@ import requests
 import random
 import time
 import subprocess
+from ping3 import ping
 
 app = Flask(__name__)
 
@@ -29,7 +30,7 @@ def get_ping_times():
         start_time = time.time()
         try:
             # Send a lightweight request to measure response time
-            response = requests.get(f"{worker}/health")  # Set a timeout to avoid hanging
+            response = requests.get(f"{worker}/ping", timeout=2)  # Set a timeout to avoid hanging
             if response.status_code == 200:
                 round_trip_time = (time.time() - start_time) * 1000  # Convert to milliseconds
                 ping_times.append((worker, round_trip_time))
@@ -39,6 +40,7 @@ def get_ping_times():
             # Set to high ping time if worker is unreachable or times out
             ping_times.append((worker, float("inf")))
     return ping_times
+
 
 @app.route("/query", methods=["POST"])
 def proxy_query():
@@ -56,11 +58,13 @@ def proxy_query():
         query_type = "select"
     elif query.strip().lower().startswith("insert"):
         query_type = "insert"
+    elif query.strip().lower().startswith("delete"):
+        query_type = "delete"
     else:
-        return jsonify({"error": "Incorrect action in query"}), 500
+        query_type = "other"
 
     # Choose target based on query type
-    if query_type == "select":
+    if query_type == "select" or query_type == "other":
         # Implement routing strategies
         if routing_strategy == "direct":
             # Forward directly to the manager for select queries
@@ -88,7 +92,7 @@ def proxy_query():
         # Forward the query to the selected target database
         response = requests.post(f"{target_url}/execute", json=modified_data)
         response_data = response.json()
-        if query_type == "select":
+        if query_type == "select" or query_type == "other":
             worker_type = f"{routing_strategy} worker IP: {target_url.split("//")[1].split(":")[0]}"
             if routing_strategy == "customized":
                 worker_type = f"{worker_type}, ping times: {ping_times}"

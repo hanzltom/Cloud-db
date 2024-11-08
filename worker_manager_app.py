@@ -52,5 +52,11 @@ def execute_query():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/ping', methods=['GET'])
+def ping():
+    # Simple ping response to measure latency, without database calls
+    return jsonify("pong"), 200
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

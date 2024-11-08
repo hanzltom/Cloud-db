@@ -83,7 +83,8 @@ def create_security_group(ec2_client, vpc_id, group_name):
     inbound_rules_private = [
         {'protocol': 'tcp', 'port_range': 3306, 'source': '172.31.0.0/16'},  # Allow MySQL traffic only within the VPC
         {'protocol': 'tcp', 'port_range': 5000, 'source': '172.31.0.0/16'},  # Allow proxy-to-manager or worker traffic only within the VPC
-        {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'}
+        {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'},
+        {'protocol': 'icmp', 'from_port': -1, 'to_port': -1, 'source': '172.31.0.0/16'}
     ]
 
     try:
@@ -113,12 +114,20 @@ def create_security_group(ec2_client, vpc_id, group_name):
         inbound_rules = inbound_rules_public if group_name == "public" else inbound_rules_private
         ip_permissions = []
         for rule in inbound_rules:
-            ip_permissions.append({
-                'IpProtocol': 'tcp',
-                'FromPort': rule['port_range'],
-                'ToPort': rule['port_range'],
-                'IpRanges': [{'CidrIp': rule['source']}]
-            })
+            if rule['protocol'] == 'icmp':
+                ip_permissions.append({
+                    'IpProtocol': rule['protocol'],
+                    'FromPort': rule['from_port'],
+                    'ToPort': rule['to_port'],
+                    'IpRanges': [{'CidrIp': rule['source']}]
+                })
+            else:
+                ip_permissions.append({
+                    'IpProtocol': 'tcp',
+                    'FromPort': rule['port_range'],
+                    'ToPort': rule['port_range'],
+                    'IpRanges': [{'CidrIp': rule['source']}]
+                })
 
         # Add inbound rules
         ec2_client.authorize_security_group_ingress(
@@ -426,6 +435,8 @@ def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_i
                             source venv/bin/activate
 
                             pip3 install flask requests redis
+                            pip3 install ping3
+
                             
                             
                             # Wait for the manager_ip.txt file to be transferred
@@ -568,6 +579,8 @@ def launch_gatekeeper(ec2_client, image_id, instance_type, key_name, security_gr
         gatekeeper.reload()
 
         print(f"Gatekeeper launched IP: {gatekeeper.public_ip_address}   ID: {gatekeeper.id}")
+        with open('gatekeeper_ip.txt', 'w') as file:
+            file.write(gatekeeper.public_ip_address )
         return gatekeeper
 
     except ClientError as e:
