@@ -9,10 +9,12 @@ strategies = ["", "direct", "random", "customized"]
 write_queries = [{"query": f"INSERT INTO actor (first_name, last_name) VALUES (\"User{i}\", \"Test{i}\")"} for i in range(1000)]
 
 # Generate 1000 read (SELECT) queries
-read_queries = [{"query": f"SELECT * FROM actor WHERE first_name = \"User{i}\";", "strategy": random.choice(strategies)} for i in range(1000)]
+read_queries = [{"query": f"SELECT * FROM actor WHERE first_name = \"User{i}\";"} for i in range(1000)]
 
-def send_request(request_num, orchestrator_url, query):
+def send_request(request_num, orchestrator_url, query, strategy = ""):
     headers = {"Content-Type": "application/json"}
+    if strategy != "":
+        query["strategy"] = strategy
     data = query
 
     try:
@@ -40,14 +42,17 @@ def main():
         write_time = f"{end_time - start_time:.2f}"
 
         # Send 1000 read requests
-        start_time = time.time()
-        for i, query in enumerate(read_queries):
-            send_request(i, gatekeeper_ip, query)
-        end_time = time.time()
-        read_time = f"{end_time - start_time:.2f}"
+        strategy_time = {}
+        for strategy in strategies:
+            start_time = time.time()
+            for i, query in enumerate(read_queries):
+                send_request(i, gatekeeper_ip, query, strategy)
+            end_time = time.time()
+            strategy_time[strategy] = f"{end_time - start_time:.2f}"
         print()
         print(f"\nTotal time taken for 1000 write operations: {write_time} seconds")
-        print(f"\nTotal time taken for 1000 read operations: {read_time} seconds")
+        for strategy in strategies:
+            print(f"\nTotal time taken for 1000 {strategy} read operations: {strategy_time[strategy]} seconds")
 
     except requests.exceptions.RequestException as e:
         print(f"Error during requests: {e}")

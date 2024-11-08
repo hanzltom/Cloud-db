@@ -83,8 +83,7 @@ def create_security_group(ec2_client, vpc_id, group_name):
     inbound_rules_private = [
         {'protocol': 'tcp', 'port_range': 3306, 'source': '172.31.0.0/16'},  # Allow MySQL traffic only within the VPC
         {'protocol': 'tcp', 'port_range': 5000, 'source': '172.31.0.0/16'},  # Allow proxy-to-manager or worker traffic only within the VPC
-        {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'},
-        {'protocol': 'icmp', 'from_port': -1, 'to_port': -1, 'source': '172.31.0.0/16'}
+        {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'}
     ]
 
     try:
@@ -712,6 +711,11 @@ def main():
         for instance in [manager, worker_instances[0], worker_instances[1], proxy, trusted_host]:
             change_security_group(ec2_client, instance, security_group_private)
         time.sleep(30)
+
+        for instance_name in ["manager", "worker_instances[0]", "worker_instances[1]", "proxy", "trusted_host", "gatekeeper"]:
+            instance = eval(instance_name)
+            print(f"IP addresses of {instance_name} are public: {instance.public_ip_address} and private: {instance.private_ip_address}")
+
 
     except Exception as e:
         print(f"Error during execution: {e}")
