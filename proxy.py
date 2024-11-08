@@ -2,8 +2,6 @@ from flask import Flask, request, jsonify
 import requests
 import random
 import time
-import subprocess
-from ping3 import ping
 
 app = Flask(__name__)
 
@@ -16,11 +14,9 @@ try:
 except FileNotFoundError:
     print("No files found.")
 
-# Define the IP addresses of the manager and workers
 manager_url = f"http://{manager_ip}:5000"
 worker_urls = [f"http://{worker_ip1}:5000", f"http://{worker_ip2}:5000"]
 
-# Round-robin counter to distribute requests to workers
 worker_index = 0
 
 # Function to calculate ping time to each worker
@@ -29,15 +25,15 @@ def get_ping_times():
     for worker in worker_urls:
         start_time = time.time()
         try:
-            # Send a lightweight request to measure response time
-            response = requests.get(f"{worker}/ping", timeout=2)  # Set a timeout to avoid hanging
+            # Send a request to measure response time
+            response = requests.get(f"{worker}/ping", timeout=2)
             if response.status_code == 200:
-                round_trip_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+                round_trip_time = (time.time() - start_time) * 1000
                 ping_times.append((worker, round_trip_time))
             else:
-                ping_times.append((worker, float("inf")))  # High ping for unsuccessful response
+                ping_times.append((worker, float("inf")))
         except requests.exceptions.RequestException:
-            # Set to high ping time if worker is unreachable or times out
+            # Set to high ping time if unreachable
             ping_times.append((worker, float("inf")))
     return ping_times
 
@@ -63,11 +59,10 @@ def proxy_query():
     else:
         query_type = "other"
 
-    # Choose target based on query type
     if query_type == "select" or query_type == "other":
         # Implement routing strategies
         if routing_strategy == "direct":
-            # Forward directly to the manager for select queries
+            # Forward to the manager
             target_url = manager_url
         elif routing_strategy == "random":
             # Randomly choose a worker
@@ -75,7 +70,7 @@ def proxy_query():
         elif routing_strategy == "customized":
             # Choose the worker with the lowest ping time
             ping_times = get_ping_times()
-            target_url = min(ping_times, key=lambda x: x[1])[0]  # Select worker with lowest ping
+            target_url = min(ping_times, key=lambda x: x[1])[0]
         else:
             # Default to round-robin
             routing_strategy = "round-robin"
@@ -85,7 +80,6 @@ def proxy_query():
         # Non-select queries go to the manager
         target_url = manager_url
 
-    # Forward the modified JSON payload with the type added
     modified_data = {"type": query_type, "query": query}
 
     try:
@@ -99,7 +93,7 @@ def proxy_query():
         else:
             worker_type = "manager"
 
-        response_data["source"] = worker_type  # Add source information to the response
+        response_data["source"] = worker_type
         return jsonify(response_data), response.status_code
     except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 500

@@ -1,13 +1,12 @@
 from flask import Flask, request, jsonify
 import mysql.connector
-import os
 
 app = Flask(__name__)
 
 # Database configuration
 DB_HOST = "localhost"
 DB_USER = "replica"
-DB_PASSWORD = "replica_password"  # Replace with the actual password you set
+DB_PASSWORD = "replica_password"
 DB_NAME = "sakila"
 
 
@@ -54,7 +53,7 @@ def execute_query():
 
 @app.route('/ping', methods=['GET'])
 def ping():
-    # Simple ping response to measure latency, without database calls
+    # ping response to measure latency
     return jsonify("pong"), 200
 
 

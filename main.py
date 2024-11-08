@@ -71,6 +71,7 @@ def create_security_group(ec2_client, vpc_id, group_name):
     Args:
         ec2_client: The boto3 ec2 client.
         vpc_id: VPC id.
+        group_name: name of security group.
     Returns:
         Security group id.
     """
@@ -81,8 +82,8 @@ def create_security_group(ec2_client, vpc_id, group_name):
         {'protocol': 'tcp', 'port_range': 3306, 'source': '0.0.0.0/0'}
     ]
     inbound_rules_private = [
-        {'protocol': 'tcp', 'port_range': 3306, 'source': '172.31.0.0/16'},  # Allow MySQL traffic only within the VPC
-        {'protocol': 'tcp', 'port_range': 5000, 'source': '172.31.0.0/16'},  # Allow proxy-to-manager or worker traffic only within the VPC
+        {'protocol': 'tcp', 'port_range': 3306, 'source': '172.31.0.0/16'},
+        {'protocol': 'tcp', 'port_range': 5000, 'source': '172.31.0.0/16'},
         {'protocol': 'tcp', 'port_range': 22, 'source': '172.31.0.0/16'}
     ]
 
@@ -150,7 +151,7 @@ def get_subnet(ec2_client, vpc_id):
         ec2_client: The boto3 ec2 client
         vpc_id: VPC id
     Returns:
-        Subnet ID
+        Subnets IDs
     """
     try:
         response = ec2_client.describe_subnets(
@@ -172,33 +173,6 @@ def get_subnet(ec2_client, vpc_id):
         print(f"Error retrieving subnets: {e}")
         sys.exit(1)
 
-def create_internet_gateway(ec2_client, vpc_id):
-    # Create and attach an Internet Gateway
-    igw = ec2_client.create_internet_gateway()
-    igw_id = igw['InternetGateway']['InternetGatewayId']
-    print('test')
-    # Attach the internet gateway to the specified VPC
-    ec2_client.attach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
-    print(f"Created and attached Internet Gateway: {igw_id} to VPC: {vpc_id}")
-    return igw
-
-def create_route(ec2_client, vpc_id, subnet_id, igw_id):
-    # Create a route table for the specified VPC
-    route_table = ec2_client.create_route_table(VpcId=vpc_id)
-    route_table_id = route_table['RouteTable']['RouteTableId']
-
-    # Create a route that directs all traffic (0.0.0.0/0) through the Internet Gateway
-    ec2_client.create_route(
-        RouteTableId=route_table_id,
-        DestinationCidrBlock='0.0.0.0/0',
-        GatewayId=igw_id
-    )
-
-    # Associate the route table with the specified subnet
-    ec2_client.associate_route_table(RouteTableId=route_table_id, SubnetId=subnet_id)
-
-    print(f"Created route for subnet: {subnet_id} via IGW: {igw_id}")
-
 def launch_workers(ec2_client, image_id, instance_type, key_name, security_group_id,
                    subnet_id, num_of_instance, manager_ip, log_file, log_pos):
     """
@@ -210,8 +184,12 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
         key_name: The key pair name to use for SSH access.
         security_group_id: The security group ID.
         subnet_id: The subnet ID.
+        num_of_instance: The number of slave instances to launch.
+        manager_ip: The IP address of the manager server.
+        log_file: The log file name.
+        log_pos: The log file position.
     Returns:
-        orchestrator instance
+        worker instance
     """
     user_data_script = f'''#!/bin/bash
                             sudo apt update -y
@@ -295,7 +273,7 @@ def launch_workers(ec2_client, image_id, instance_type, key_name, security_group
 
 def launch_manager(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
     """
-    Launches EC2 orchestrator instance.
+    Launches EC2 manager instance.
     Args:
         ec2_client: The EC2 client.
         image_id: The AMI ID for the instance.
@@ -304,7 +282,7 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
         security_group_id: The security group ID.
         subnet_id: The subnet ID.
     Returns:
-        orchestrator instance
+        Manager instance
     """
     user_data_script = '''#!/bin/bash 
                                 # Update and install MySQL
@@ -402,6 +380,14 @@ def launch_manager(ec2_client, image_id, instance_type, key_name, security_group
         sys.exit(1)
 
 def transfer_master_status(manager, key_file):
+    """
+    Function to transport master status file for the replication process
+    Args:
+        manager: Manager instance
+        key_file: Key file path
+    Returns:
+        File and position arguments
+    """
     try:
         time.sleep(120)
         ssh = paramiko.SSHClient()
@@ -425,6 +411,18 @@ def transfer_master_status(manager, key_file):
         sys.exit(1)
 
 def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
+    """
+    Launches EC2 proxy instance.
+    Args:
+        ec2_client: The EC2 client.
+        image_id: The AMI ID for the instance.
+        instance_type: The type of instance (e.g., 't2.micro').
+        key_name: The key pair name to use for SSH access.
+        security_group_id: The security group ID.
+        subnet_id: The subnet ID.
+    Returns:
+        Proxy instance
+    """
     user_data_script = '''#!/bin/bash
                             sudo apt update -y
                             sudo apt install -y python3-pip python3-venv
@@ -497,6 +495,13 @@ def launch_proxy(ec2_client, image_id, instance_type, key_name, security_group_i
         sys.exit(1)
 
 def transfer_files(instance, key_file, files_dict):
+    """
+    Function to transport files to instances
+    Args:
+        instance: Instance object
+        key_file: Key file path
+        files_dict: Dictionary of file paths
+    """
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -516,6 +521,18 @@ def transfer_files(instance, key_file, files_dict):
         sys.exit(1)
 
 def launch_gatekeeper(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
+    """
+    Launches EC2 gatekeeper instance.
+    Args:
+        ec2_client: The EC2 client.
+        image_id: The AMI ID for the instance.
+        instance_type: The type of instance (e.g., 't2.micro').
+        key_name: The key pair name to use for SSH access.
+        security_group_id: The security group ID.
+        subnet_id: The subnet ID.
+    Returns:
+        Gatekeeper instance
+    """
     user_data_script = '''#!/bin/bash 
                                     # Update and install MySQL
                                     sudo apt update -y
@@ -587,6 +604,18 @@ def launch_gatekeeper(ec2_client, image_id, instance_type, key_name, security_gr
         sys.exit(1)
 
 def launch_trusted_host(ec2_client, image_id, instance_type, key_name, security_group_id, subnet_id):
+    """
+    Launches EC2 trusted host instance.
+    Args:
+        ec2_client: The EC2 client.
+        image_id: The AMI ID for the instance.
+        instance_type: The type of instance (e.g., 't2.micro').
+        key_name: The key pair name to use for SSH access.
+        security_group_id: The security group ID.
+        subnet_id: The subnet ID.
+    Returns:
+        Trusted host instance
+    """
     user_data_script = '''#!/bin/bash 
                                         # Update and install MySQL
                                         sudo apt update -y
@@ -657,6 +686,13 @@ def launch_trusted_host(ec2_client, image_id, instance_type, key_name, security_
         sys.exit(1)
 
 def change_security_group(ec2, instance, security_group_id):
+    """
+    Function to change security group of the instance
+    Args:
+        ec2: EC2 client
+        instance: Instance object
+        security_group_id: Security group ID
+    """
     ec2.modify_instance_attribute(InstanceId=instance.id, Groups=[security_group_id])
     print("Security group changed")
 
@@ -674,15 +710,17 @@ def main():
         # Get key pair, security group, and subnet
         key_name = get_key_pair(ec2_client)
 
+        # Create security groups and subnets
         key_file_path = os.path.join(os.path.expanduser('~/.aws'), f"{key_name}.pem")
         security_group_public = create_security_group(ec2_client, vpc_id, "public")
         security_group_private = create_security_group(ec2_client, vpc_id, "private")
         subnet_public, subnet_private = get_subnet(ec2_client, vpc_id)
 
-
+        # Launch manager and transfer master status file
         manager = launch_manager(ec2_client, image_id, "t2.micro", key_name, security_group_public, subnet_private)
         log_file, log_pos = transfer_master_status(manager, key_file_path)
 
+        # Launch workers
         worker_instances = []
         for i in range(num_of_workers):
             worker = launch_workers(ec2_client, image_id, "t2.micro", key_name, security_group_public,
@@ -692,26 +730,35 @@ def main():
             file.write(f"{worker_instances[0].private_ip_address} {worker_instances[1].private_ip_address}\n")
 
         time.sleep(60)
+
+        # Transfer Python scripts to manager and workers
         for instance in [manager, worker_instances[0], worker_instances[1]]:
             transfer_files(instance, key_file_path, ['worker_manager_app.py'])
 
+        # Launch gatekeeper, trusted host and proxy
         gatekeeper = launch_gatekeeper(ec2_client, image_id, "t2.large", key_name,
                                        security_group_public, subnet_public)
         trusted_host = launch_trusted_host(ec2_client, image_id, "t2.large", key_name,
                                            security_group_public, subnet_private)
         proxy = launch_proxy(ec2_client, image_id, "t2.large", key_name,
                              security_group_public, subnet_private)
+
         time.sleep(60)
+
+        # Transfer files to gatekeeper, trusted host and proxy
         transfer_files(gatekeeper, key_file_path, ['gatekeeper.py', 'trusted_host_ip.txt'])
         transfer_files(trusted_host, key_file_path, ['trusted_host.py', 'proxy_ip.txt'])
         transfer_files(proxy, key_file_path, ['manager_ip.txt', 'workers_ip.txt', 'proxy.py'])
 
         time.sleep(30)
+
+        # Change security groups
         print("Changing security groups:")
         for instance in [manager, worker_instances[0], worker_instances[1], proxy, trusted_host]:
             change_security_group(ec2_client, instance, security_group_private)
         time.sleep(30)
 
+        # Print the IPs of instances
         for instance_name in ["manager", "worker_instances[0]", "worker_instances[1]", "proxy", "trusted_host", "gatekeeper"]:
             instance = eval(instance_name)
             print(f"IP addresses of {instance_name} are public: {instance.public_ip_address} and private: {instance.private_ip_address}")

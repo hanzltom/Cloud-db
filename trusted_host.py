@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify
 import requests
 import re
-import os
 
 app = Flask(__name__)
 
+# Get proxy IP
 try:
     with open('proxy_ip.txt', 'r') as file:
         proxy_ip = file.read().strip()
@@ -15,7 +15,7 @@ except FileNotFoundError:
 def validate(query, authorization):
     # Basic SQL injection prevention patterns
     forbidden_patterns = [
-        r"(--|\b(ALTER|DROP|TRUNCATE|UPDATE|EXEC|OR|TRUE)\b)",  # Dangerous SQL keywords
+        r"(--|\b(ALTER|DROP|TRUNCATE|UPDATE|EXEC|OR|TRUE)\b)",
     ]
     for pattern in forbidden_patterns:
         if re.search(pattern, query, re.IGNORECASE):
@@ -28,12 +28,11 @@ def validate(query, authorization):
                 and re.search(r"(?i)\bDELETE\b.*\bFROM\b.*\bWHERE\b.*[^\s]", query, re.IGNORECASE) is None):
             return False, "Missing where in query"
 
-    # Check for tautological conditions in WHERE clause (e.g., 1=1, 2=2, etc.)
+    # Check for tautological conditions in WHERE clause (1=1, 2=2, ...)
     if query.strip().lower().startswith("select"):
         where_clause = re.search(r"(?i)\bWHERE\b\s*(.+)", query)
         if where_clause:
             condition = where_clause.group(1)
-            # Prohibit any condition like 'n=n' where n is a digit
             if re.search(r"\b(\d+)\s*=\s*\1\b", condition):
                 print("Tautological condition detected")
                 return False, "Tautological condition (e.g., 'WHERE 1=1') is prohibited."
@@ -41,11 +40,12 @@ def validate(query, authorization):
             # Reject query if WHERE clause is missing or empty
             return False, "Missing or empty WHERE clause in query."
 
+    # Check authorization
     if not authorization:
         return False, "Authorization required"
 
     # Check for query length
-    if len(query) > 1000:  # Example max length; adjust as necessary
+    if len(query) > 1000:
         print("Query too large")
         return False, "Query too large"
 
@@ -53,11 +53,13 @@ def validate(query, authorization):
 
 @app.route('/validate', methods=['POST'])
 def execute_query():
+    # Get the query
     data = request.get_json()
     query = data.get("query")
     authorization = data.get("Authorization")
     routing_strategy = data.get("strategy", "round-robin")
 
+    # Check the security patterns, return if not correct
     result_validate, str_res = validate(query, authorization)
     if not result_validate:
         return jsonify({"error": f"{str_res}"}), 400
@@ -65,6 +67,7 @@ def execute_query():
     modified_data = {"query": query, "strategy": routing_strategy}
 
     try:
+        # Forward the request
         response = requests.post(f"http://{proxy_ip}:5000/query", json=modified_data)
         return jsonify(response.json()), response.status_code
 
