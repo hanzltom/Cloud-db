@@ -700,7 +700,6 @@ def main():
     try:
         # Initialize EC2 and ELB clients
         ec2_client = boto3.client('ec2')
-        elbv2_client = boto3.client('elbv2')
         num_of_workers = 2
 
         # Define essential AWS configuration
