@@ -2,7 +2,7 @@ Cloud Architecture with Database
 
 ## Introduction
 
-The main task of this priject is to set up a MySQL cluster on Amazon EC2 and define a complete cloud architecture to simplify the connection process to the database. To ensure requests are correct and secure, additional instances are set up for smooth operations.
+The main task of this project is to set up a MySQL cluster on Amazon EC2 and define a complete cloud architecture to simplify the connection process to the database. Additional instances are set up for smooth operations to ensure requests are correct and secure.
 
 ---
 
@@ -11,7 +11,7 @@ The main task of this priject is to set up a MySQL cluster on Amazon EC2 and def
 ### Manager Instance
 - Acts as the master node for the database.  
 - Handles all `WRITE` requests (e.g., `INSERT`, `DELETE`) and specific `READ` requests if configured.  
-- Uses MySQL with the Sakila database and runs a Python script to execute queries received on port 5000.  
+- MySQL is used with the Sakila database and runs a Python script to execute queries received on port 5000.  
 
 ### Worker Instances
 - Function as slave nodes replicating the manager’s database for consistency.  
